@@ -7,7 +7,7 @@ import (
 	"io"
 	"log"
 	"net"
-	"os"
+	"time"
 
 	pb "github.com/smukherj1/windows-agent/grpc/server"
 	"golang.org/x/crypto/ssh"
@@ -15,10 +15,10 @@ import (
 )
 
 var (
-	port         = flag.Int("port", 8000, "The server port")
-	remoteServer = flag.String("remote.server", "", "The address of the remote ssh server.")
-	remoteUser   = flag.String("remote.user", "", "The user on the remote ssh server.")
-	privateKey   = flag.String("private.key", "", "The path to the private key for the remote ssh server.")
+	port           = flag.Int("port", 8000, "The server port")
+	remoteServer   = flag.String("remote.server", "", "The address of the remote ssh server.")
+	remoteUser     = flag.String("remote.user", "", "The user on the remote ssh server.")
+	remotePassword = flag.String("remote.password", "", "The ssh password for the remote ssh server.")
 )
 
 type server struct {
@@ -30,35 +30,26 @@ func (s *server) Hello(_ context.Context, in *pb.HelloRequest) (*pb.HelloReply, 
 	return &pb.HelloReply{Message: "Hello " + in.GetMessage()}, nil
 }
 
-func startReverseSshTunnel(port int, remoteServer, remoteUser, privateKey string) {
-	key, err := os.ReadFile(privateKey)
-	if err != nil {
-		log.Fatalf("unable to read private key: %v", err)
-	}
-
-	// Create the Signer for this private key.
-	signer, err := ssh.ParsePrivateKey(key)
-	if err != nil {
-		log.Fatalf("unable to parse private key: %v", err)
-	}
-
+func startReverseSshTunnel(port int, remoteServer, remoteUser, remotePassword string) {
 	config := &ssh.ClientConfig{
 		User: remoteUser,
 		Auth: []ssh.AuthMethod{
-			ssh.PublicKeys(signer),
+			ssh.Password(remotePassword),
 		},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         10 * time.Second,
 	}
 
+	log.Printf("Starting reverse SSH tunnel from %v@%v:%v (password length=%v) -> localhost:%v.", remoteUser, remoteServer, port, len(remotePassword), port)
 	// Connect to the remote SSH server.
-	client, err := ssh.Dial("tcp", remoteServer, config)
+	client, err := ssh.Dial("tcp", remoteServer+":22", config)
 	if err != nil {
 		log.Fatalf("unable to connect to remote server: %v", err)
 	}
 	defer client.Close()
 
 	// Listen on the remote server.
-	remotePort := fmt.Sprintf(":%d", port)
+	remotePort := fmt.Sprintf("localhost:%d", port)
 	l, err := client.Listen("tcp", remotePort)
 	if err != nil {
 		log.Fatalf("unable to listen on remote server: %v", err)
@@ -72,6 +63,7 @@ func startReverseSshTunnel(port int, remoteServer, remoteUser, privateKey string
 			log.Printf("failed to accept remote connection: %v", err)
 			continue
 		}
+		log.Println("Got remote connection from", remote.RemoteAddr(), "to", remote.LocalAddr())
 
 		local, err := net.Dial("tcp", localPort)
 		if err != nil {
@@ -97,7 +89,7 @@ func main() {
 	flag.Parse()
 
 	if *remoteServer != "" {
-		go startReverseSshTunnel(*port, *remoteServer, *remoteUser, *privateKey)
+		go startReverseSshTunnel(*port, *remoteServer, *remoteUser, *remotePassword)
 	}
 
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
